@@ -1,0 +1,78 @@
+name: Append UUID from issue
+
+on:
+  issues:
+    types: [opened, edited]
+
+jobs:
+  append:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # allow push
+      issues: write            # allow label / comment
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Append UUID to list
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { number, title, body } = context.payload.issue;
+            const issue_number = number;
+
+            /* 1.  grab IDs from BODY only ------------------------------------------ */
+            const ids = [...new Set(                       // de-duplicate
+              body.match(/[0-9]{17,20}/gmi)   // grab all 17-20-digit numbers
+              || [])];                           // default empty array
+
+            if (!ids.length) {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number,
+                body: "👋  No 17-20-digit IDs found in the body. Nothing appended."
+              });
+              return;
+            }
+
+            // console.log(ids)
+
+            /* 2.  load JSON --------------------------------------------------------- */          
+            const path = process.cwd() + "/antied/list.json";
+            const blacklisted = JSON.parse(fs.readFileSync(path, "utf8"));
+
+            if(!blacklisted) {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number,
+                body: "No Target JSON"
+              });
+              return;
+            };
+
+            // console.log(blacklisted)
+
+            const beforeLen = blacklisted.list?.length;
+
+            /* 3.  append only NEW IDs ----------------------------------------------- */
+            for (const id of ids) {
+              if (!blacklisted.list?.includes(id)) blacklisted.list.push(id);
+            }
+            const added = blacklisted.list?.length - beforeLen;
+
+            /* 4.  write & commit ---------------------------------------------------- */
+            fs.writeFileSync(path, JSON.stringify(blacklisted, null, 2) + '\n');
+            await exec.exec('git', ['config', 'user.name',  'github-actions[bot]']);
+            await exec.exec('git', ['config', 'user.email', 'github-actions[bot]@users.noreply.github.com']);
+            await exec.exec('git', ['add', path]);
+            await exec.exec('git', ['commit', '-m', `blacklist: add ${added} ID(s) (closes #${number})`]);
+            await exec.exec('git', ['push', 'origin', 'HEAD']);
+
+            /* 5.  feedback ---------------------------------------------------------- */
+            const msg = added
+              ? `✅ Added ${added} new ID(s):\n` + ids.filter(id => !blacklisted.list.includes(id)).map(id => `- \`${id}\``).join('\n')
+              : "ℹ️  All submitted IDs are already blacklisted.";
+            await github.rest.issues.createComment({ ...context.repo, issue_number, body: msg });
+            await github.rest.issues.update({ ...context.repo, issue_number, state: 'closed', labels: ['added'] });
